@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Head Soccer da Galera</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -177,6 +178,11 @@ const SFX = {
   },
   play(n, throttle = 0) {
     if (throttle) { const now = performance.now(); if (this.last[n] && now - this.last[n] < throttle) return; this.last[n] = now; }
+    if (NET.log && !this._in) NET.log.push(n);
+    this._in = (this._in || 0) + 1;
+    try { this._play(n); } finally { this._in--; }
+  },
+  _play(n) {
     switch (n) {
       case 'kick': this.tone(160, 0.09, { to: 55, vol: 0.35 }); this.noise(0.05, { f: 3000, ft: 'highpass', vol: 0.12 }); break;
       case 'head': this.tone(260, 0.06, { type: 'triangle', to: 180, vol: 0.3 }); break;
@@ -220,6 +226,7 @@ const SFX = {
   },
 };
 function speak(text, lang = 'pt-BR', pitch = 1, rate = 1) {
+  if (NET.slog) NET.slog.push([text, lang, pitch, rate]);
   if (SFX.muted || !window.speechSynthesis) return;
   try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = lang; u.pitch = pitch; u.rate = rate; u.volume = 0.9; speechSynthesis.speak(u); } catch (e) { }
 }
@@ -1324,8 +1331,15 @@ class Match {
     if (!cfg.tour) items.push({ label: 'ENCERRAR PARTIDA', action: () => this.cfg.onEnd(this.result()) });
     items.push({ label: cfg.tour ? 'SAIR DO TORNEIO' : 'SAIR PRO MENU', action: () => setScene(new TitleScene()) });
     this.pauseMenu = new Menu(items, { y: 96, w: 190 });
+    if (cfg.net) {
+      const it2 = [{ label: 'CONTINUAR', action: () => { this.paused = false; } }];
+      if (cfg.net === 'host') it2.push({ label: 'ENCERRAR PARTIDA', action: () => this.cfg.onEnd(this.result()) });
+      it2.push({ label: 'SAIR DA SALA', action: () => netLeave() });
+      this.pauseMenu = new Menu(it2, { y: 96, w: 190 });
+    }
   }
   allPlayers() { return this.players.concat(this.allies); }
+  get online() { return !!this.cfg.net; }
   text(s, x, y, col = '#fff', size = 8, life = 60) { this.texts.push({ s, x, y, col, size, life, max: life }); }
   banner(s, col) { this.banners = [{ s, col, life: 80, max: 80 }]; }
   burst(x, y, col, n = 10, spd = 2) { for (let i = 0; i < n; i++) { const l = randi(18, 34); this.parts.push({ x, y, vx: rand(-spd, spd), vy: rand(-spd * 1.4, spd * 0.4), life: l, max: l, col: Array.isArray(col) ? choice(col) : col, g: 0.12, s: randi(1, 2) }); } }
@@ -1340,8 +1354,9 @@ class Match {
 
   update() {
     this.t++;
-    if (this.paused) { if (wasPressed('Escape', 'KeyP')) this.paused = false; else this.pauseMenu.update(); return; }
-    if (wasPressed('Escape', 'KeyP') && this.state !== 'end') { this.paused = true; this.pauseMenu.i = 0; SFX.play('back'); return; }
+    if (this.cfg.net) { if (wasPressed('Escape', 'KeyP')) { this.paused = !this.paused; this.pauseMenu.i = 0; SFX.play('back'); } else if (this.paused) this.pauseMenu.update(); }
+    else if (this.paused) { if (wasPressed('Escape', 'KeyP')) this.paused = false; else this.pauseMenu.update(); return; }
+    if (!this.cfg.net && wasPressed('Escape', 'KeyP') && this.state !== 'end') { this.paused = true; this.pauseMenu.i = 0; SFX.play('back'); return; }
     if (wasPressed('F1') && this.powersOn) for (const p of this.players) p.power = 100;
     if (this.shake > 0) this.shake--;
     if (this.party > 0) this.party--;
@@ -1360,7 +1375,7 @@ class Match {
       } else this.time++;
     }
     for (const p of this.players) {
-      const inp = live ? p.ctrl.get(p, this) : {};
+      const inp = live && !(this.paused && p.ctrl instanceof HumanCtrl) ? p.ctrl.get(p, this) : {};
       if (live && this.powersOn) { const pw = POWERS[p.ch.id]; if (pw.passive) pw.passive(p, this); p.addPower(p.chargeRate()); }
       p.update(inp);
       if (live && this.powersOn && inp.power && p.power >= 100 && !p.locked()) this.activate(p);
@@ -1389,6 +1404,7 @@ class Match {
     this.texts = this.texts.filter(t => t.life > 0);
     for (const b of this.banners) b.life--;
     this.banners = this.banners.filter(b => b.life > 0);
+    if (this.cfg.net === 'host') netSendSnap(this);
   }
   finish() { this.over = true; this.state = 'end'; this.stT = 170; SFX.play('whistleLong'); this.banner('FIM DE JOGO', '#ffffff'); }
   activate(p) { p.power = 0; SFX.play('power'); this.banner(p.ch.active.name + '!', p.ch.color); POWERS[p.ch.id].use(p, this); }
@@ -1814,6 +1830,7 @@ class TitleScene {
       { label: '1 x 1 LOCAL', action: () => { G.mode = 'local'; setScene(new RulesScene('local')); } },
       { label: 'CONTRA CPU', action: () => { G.mode = 'cpu'; setScene(new RulesScene('cpu')); } },
       { label: 'TORNEIO', action: () => setScene(new TourSetupScene()) },
+      { label: 'ONLINE', action: () => { G.mode = 'online'; setScene(new OnlineMenuScene()); } },
       { label: 'CONTROLES', action: () => setScene(new ControlsScene()) },
     ], { y: 108, w: 180 });
   }
@@ -1884,6 +1901,7 @@ class SelectScene {
     this.cur = [Math.max(0, i1), Math.max(0, i2 >= 0 ? i2 : 1)]; this.lock = [false, false];
   }
   cell(i) { return { x: 30 + (i % 5) * 84, y: 20 + Math.floor(i / 5) * 66, w: 80, h: 62 }; }
+  get online() { return this.mode === 'online'; }
   move(idx, l, r, u, d) {
     let c = this.cur[idx];
     if (wasPressed(...l)) c = (c + 9) % 10; if (wasPressed(...r)) c = (c + 1) % 10; if (wasPressed(...u) || wasPressed(...d)) c = (c + 5) % 10;
@@ -1891,6 +1909,7 @@ class SelectScene {
   }
   update() {
     this.t++;
+    if (this.mode === 'online') { this.updateOnline(); return; }
     if (this.done) { if (--this.done === 0) this.finish(); return; }
     if (wasPressed('Escape')) {
       SFX.play('back');
@@ -1916,10 +1935,20 @@ class SelectScene {
     }
     if (this.lock[0] && this.lock[1]) this.done = 25;
   }
+  updateOnline() {
+    if (wasPressed('Escape')) { SFX.play('back'); netLeave(); return; }
+    if (NET.oppPick) { const oi = CHARS.findIndex(c => c.id === NET.oppPick); if (oi >= 0) { this.cur[1] = oi; this.lock[1] = true; } }
+    if (this.lock[0]) return;
+    this.move(0, ['KeyA', 'ArrowLeft'], ['KeyD', 'ArrowRight'], ['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']);
+    let pick = wasPressed('Space', 'Enter', 'NumpadEnter');
+    if (wasPressed('KeyR')) { this.cur[0] = randi(0, 9); SFX.play('move'); }
+    if (mouse.click) for (let i = 0; i < 10; i++) if (inRect(mouse, this.cell(i))) { this.cur[0] = i; pick = true; }
+    if (pick) { this.lock[0] = true; SFX.play('select'); NET.myPick = CHARS[this.cur[0]].id; netSend({ t: 'pick', id: NET.myPick }); netAdvance(); }
+  }
   finish() { G.c1 = CHARS[this.cur[0]].id; G.c2 = CHARS[this.cur[1]].id; setScene(new StadiumScene()); }
   render() {
     bgPattern();
-    const title = this.mode === 'local' ? 'P1: WASD+ESPAÇO  P2: SETAS/IJKL+ENTER' : (this.lock[0] ? 'ESCOLHA O RIVAL (CPU)' : 'ESCOLHA SEU JOGADOR');
+    const title = this.mode === 'online' ? (this.lock[0] ? 'AGUARDANDO O AMIGO ESCOLHER...' : 'ESCOLHA SEU JOGADOR') : this.mode === 'local' ? 'P1: WASD+ESPAÇO  P2: SETAS/IJKL+ENTER' : (this.lock[0] ? 'ESCOLHA O RIVAL (CPU)' : 'ESCOLHA SEU JOGADOR');
     txt(title, W / 2, 6, { align: 'center', color: '#ffd23a' });
     for (let i = 0; i < 10; i++) {
       const r = this.cell(i), ch = CHARS[i];
@@ -1932,7 +1961,7 @@ class SelectScene {
       txt(ch.short, r.x + r.w / 2, r.y + r.h - 11, { align: 'center', color: ch.color });
       frameRect(ctx, r.x, r.y, r.w, r.h, '#3a3270');
     }
-    const curs = [[0, '#3b82ff', 'P1']]; if (this.mode === 'local' || this.lock[0]) curs.push([1, '#ef4444', this.mode === 'cpu' ? 'CPU' : 'P2']);
+    const curs = [[0, '#3b82ff', this.mode === 'online' ? 'EU' : 'P1']]; if (this.mode === 'online' ? !!NET.oppPick : (this.mode === 'local' || this.lock[0])) curs.push([1, '#ef4444', this.mode === 'cpu' ? 'CPU' : this.mode === 'online' ? 'ELE' : 'P2']);
     for (const [k, col, lab] of curs) {
       const r = this.cell(this.cur[k]), blink = this.lock[k] || this.t % 30 < 22;
       if (blink) { frameRect(ctx, r.x - 1 - k, r.y - 1 - k, r.w + 2 + k * 2, r.h + 2 + k * 2, col, 2); R(ctx, k ? r.x + r.w - 26 : r.x, r.y - 8, 26, 9, col); txt(lab, k ? r.x + r.w - 13 : r.x + 13, r.y - 7, { align: 'center', outline: false }); }
@@ -1948,16 +1977,19 @@ class SelectScene {
       y += 2; txt('ATIVO: ' + ch.active.name, x + 6, y, { color: '#3fd0ff' }); y += 11;
       for (const l of wrap(ch.active.desc, w - 12)) { txt(l, x + 6, y, { color: '#e8e8f0' }); y += 10; }
     };
-    info(0, 6); info(1, 242);
+    info(0, 6);
+    if (this.mode === 'online' && !NET.oppPick) { panel(242, 156, 232, 110, 'rgba(10,8,30,0.92)', '#ef4444'); txt('AGUARDANDO O AMIGO', 358, 203, { align: 'center', color: '#9aa0c0' }); txt('ESCOLHER...', 358, 216, { align: 'center', color: '#9aa0c0' }); }
+    else info(1, 242);
   }
 }
 
 class StadiumScene {
   constructor() { const h = CHAR_BY_ID[G.c1].home; this.i = STADIUMS.findIndex(s => s.id === h); this.t = 0; }
+  get online() { return G.mode === 'online'; }
   cell(i) { return { x: 14 + (i % 5) * 92, y: 26 + Math.floor(i / 5) * 64, w: 88, h: 50 }; }
   update() {
     this.t++;
-    if (wasPressed('Escape')) { SFX.play('back'); setScene(new SelectScene()); return; }
+    if (wasPressed('Escape')) { SFX.play('back'); if (G.mode === 'online') netLeave(); else setScene(new SelectScene()); return; }
     let i = this.i;
     if (wasPressed('KeyA', 'ArrowLeft')) i = (i + 9) % 10; if (wasPressed('KeyD', 'ArrowRight')) i = (i + 1) % 10;
     if (wasPressed('KeyW', 'ArrowUp', 'KeyS', 'ArrowDown')) i = (i + 5) % 10;
@@ -1967,7 +1999,7 @@ class StadiumScene {
     for (let k = 0; k < 10; k++) if (inRect(mouse, this.cell(k))) { if (mouse.moved) this.i = k; if (mouse.click) { this.i = k; this.go(); return; } }
     if (wasPressed('Space', 'Enter', 'NumpadEnter')) this.go();
   }
-  go() { SFX.play('select'); G.stadium = STADIUMS[this.i].id; startMatch(); }
+  go() { SFX.play('select'); G.stadium = STADIUMS[this.i].id; if (G.mode === 'online') netStartHost(); else startMatch(); }
   render() {
     bgPattern();
     txt('ESCOLHA O ESTÁDIO', W / 2, 8, { align: 'center', color: '#ffd23a' });
@@ -2022,12 +2054,13 @@ class VsScene {
 }
 
 class ResultScene {
-  constructor(r, tour) {
-    this.r = r; this.tour = tour; this.t = 0;
-    const items = tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
+  constructor(r, tour, net) {
+    this.r = r; this.tour = tour; this.net = net; this.t = 0;
+    const items = net ? [{ label: 'MENU', action: () => { netReset(); setScene(new TitleScene()); } }] : tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
       : [{ label: 'REVANCHE', action: () => startMatch() }, { label: 'TROCAR JOGADORES', action: () => setScene(new SelectScene()) }, { label: 'MENU', action: () => setScene(new TitleScene()) }];
     this.menu = new Menu(items, { y: 186, w: 200 });
-    const humanLost = !tour && G.mode === 'cpu' && r.winner === 1;
+    const mineIdx = NET.role === 'guest' ? 1 : 0;
+    const humanLost = net ? (r.winner !== -1 && r.winner !== mineIdx) : (!tour && G.mode === 'cpu' && r.winner === 1);
     SFX.play(r.winner === -1 ? 'coin' : humanLost ? 'lose' : 'jackpot');
   }
   update() { this.t++; this.menu.update(); }
@@ -2041,7 +2074,8 @@ class ResultScene {
     } else {
       const wId = this.r.winner === 0 ? A.id : B.id, lId = this.r.winner === 0 ? B.id : A.id, w = CHAR_BY_ID[wId];
       let t;
-      if (!this.tour && G.mode === 'cpu') t = this.r.winner === 0 ? 'VOCÊ VENCEU!' : 'A CPU VENCEU...';
+      if (this.net) t = this.r.winner === (NET.role === 'guest' ? 1 : 0) ? 'VOCÊ VENCEU!' : 'O AMIGO VENCEU...';
+      else if (!this.tour && G.mode === 'cpu') t = this.r.winner === 0 ? 'VOCÊ VENCEU!' : 'A CPU VENCEU...';
       else t = 'VITÓRIA DO ' + w.short + '!';
       txt(t, W / 2, 14, { align: 'center', size: t.length > 18 ? 8 : 16, color: w.color });
       drawHead(ctx, getHead(wId), W / 2, 90 - Math.abs(Math.sin(this.t * 0.1)) * 10, 1, 3);
@@ -2482,14 +2516,317 @@ class ChampionScene {
   }
 }
 
+// ============================ ONLINE (P2P / PeerJS) ===================
+// O host roda a partida inteira; o convidado manda os controles e recebe "fotos" do jogo.
+const NET = { peer: null, conn: null, role: null, code: '', myPick: null, oppPick: null, snap: null, sfxQ: [], spQ: [], log: null, slog: null, remote: null };
+const CODE_CH = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const genCode = () => { let s = ''; for (let i = 0; i < 5; i++) s += CODE_CH[Math.floor(Math.random() * CODE_CH.length)]; return s; };
+const PEER_PREFIX = 'hsgalera-';
+
+function netReset() {
+  const peer = NET.peer, conn = NET.conn;
+  NET.peer = null; NET.conn = null; NET.role = null; NET.code = ''; NET.myPick = null; NET.oppPick = null;
+  NET.snap = null; NET.sfxQ = []; NET.spQ = []; NET.log = null; NET.slog = null; NET.remote = null;
+  setTimeout(() => { try { conn && conn.close(); } catch (e) { } try { peer && peer.destroy(); } catch (e) { } }, 250);
+}
+function netSend(o) { try { if (NET.conn && NET.conn.open) NET.conn.send(o); } catch (e) { } }
+function netErrText(e) {
+  const t = e && e.type;
+  if (t === 'peer-unavailable') return 'SALA NÃO ENCONTRADA';
+  if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') return 'SEM CONEXÃO COM O SERVIDOR';
+  if (t === 'browser-incompatible') return 'NAVEGADOR SEM SUPORTE';
+  return 'ERRO: ' + (t || 'DESCONHECIDO');
+}
+function netBind(conn) {
+  NET.conn = conn;
+  conn.on('data', d => { if (conn === NET.conn) netHandle(d); });
+  conn.on('close', () => { if (conn === NET.conn) netLost(); });
+  conn.on('error', () => { if (conn === NET.conn) netLost(); });
+}
+function netLost() {
+  if (scene && scene.online) { netReset(); setScene(new MsgScene('O AMIGO SAIU DA SALA')); }
+}
+function netLeave() { netSend({ t: 'bye' }); netReset(); setScene(new TitleScene()); }
+
+function netCreateHost(onCode, onErr, onConn) {
+  if (typeof Peer === 'undefined') { onErr('SEM CONEXÃO COM O SERVIDOR'); return; }
+  let tries = 0;
+  const attempt = () => {
+    const code = genCode();
+    let peer;
+    try { peer = new Peer(PEER_PREFIX + code, { debug: 0 }); } catch (e) { onErr('NAVEGADOR SEM SUPORTE'); return; }
+    NET.peer = peer;
+    peer.on('open', () => { if (peer === NET.peer) { NET.code = code; onCode(code); } });
+    peer.on('connection', conn => {
+      if (peer !== NET.peer) return;
+      conn.on('open', () => {
+        if (peer !== NET.peer || NET.conn) { try { conn.close(); } catch (e) { } return; }
+        NET.role = 'host'; netBind(conn); onConn();
+      });
+    });
+    peer.on('disconnected', () => { if (peer === NET.peer && !NET.conn) { try { peer.reconnect(); } catch (e) { } } });
+    peer.on('error', e => {
+      if (peer !== NET.peer) return;
+      if (e && e.type === 'unavailable-id' && tries++ < 5) { try { peer.destroy(); } catch (_) { } attempt(); return; }
+      onErr(netErrText(e));
+    });
+  };
+  attempt();
+}
+function netJoin(code, onErr) {
+  if (typeof Peer === 'undefined') { onErr('SEM CONEXÃO COM O SERVIDOR'); return; }
+  let peer, done = false;
+  const fail = m => { if (done) return; done = true; clearTimeout(to); onErr(m); };
+  const to = setTimeout(() => { if (!NET.conn) fail('TEMPO ESGOTADO'); }, 15000);
+  try { peer = new Peer({ debug: 0 }); } catch (e) { fail('NAVEGADOR SEM SUPORTE'); return; }
+  NET.peer = peer;
+  peer.on('open', () => {
+    if (peer !== NET.peer) return;
+    const conn = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' });
+    conn.on('open', () => {
+      if (done || peer !== NET.peer) { try { conn.close(); } catch (e) { } return; }
+      done = true; clearTimeout(to);
+      NET.role = 'guest'; netBind(conn); G.mode = 'online'; setScene(new SelectScene());
+    });
+    conn.on('error', () => fail('FALHA AO CONECTAR'));
+  });
+  peer.on('error', e => { if (peer === NET.peer) fail(netErrText(e)); });
+}
+
+function netHandle(d) {
+  if (!d || !d.t) return;
+  switch (d.t) {
+    case 'pick': NET.oppPick = d.id; netAdvance(); break;
+    case 'start': if (NET.role === 'guest') startGuest(d); break;
+    case 'snap':
+      NET.snap = d;
+      if (d.sfx && d.sfx.length) { NET.sfxQ.push(...d.sfx); if (NET.sfxQ.length > 24) NET.sfxQ.splice(0, NET.sfxQ.length - 24); }
+      if (d.sp && d.sp.length) { NET.spQ.push(...d.sp); if (NET.spQ.length > 3) NET.spQ.splice(0, NET.spQ.length - 3); }
+      break;
+    case 'inp': if (NET.remote) NET.remote.set(d); break;
+    case 'end': if (NET.role === 'guest') setScene(new ResultScene(d.res, false, true)); break;
+    case 'bye': netLost(); break;
+  }
+}
+// os dois já escolheram o jogador: o host escolhe o estádio, o convidado espera
+function netAdvance() {
+  if (!NET.myPick || !NET.oppPick || !(scene instanceof SelectScene)) return;
+  if (NET.role === 'host') { G.c1 = NET.myPick; G.c2 = NET.oppPick; setScene(new StadiumScene()); }
+  else setScene(new NetWaitScene('O HOST ESTÁ ESCOLHENDO O ESTÁDIO'));
+}
+function netStartHost() {
+  const r = G.rules; let time = r.time, goals = r.goals; if (!time && !goals) goals = 5;
+  const remote = new RemoteCtrl(); NET.remote = remote; NET.log = []; NET.slog = []; NET.snap = null;
+  const cfg = {
+    c1: NET.myPick, c2: NET.oppPick, stadium: G.stadium, ctrl1: new HumanCtrl(CTRL.solo), ctrl2: remote,
+    time, goals, powers: r.powers, allowDraw: false, net: 'host',
+    onEnd: res => { netSend({ t: 'end', res }); setScene(new ResultScene(res, false, true)); },
+  };
+  netSend({ t: 'start', c1: cfg.c1, c2: cfg.c2, stadium: cfg.stadium, time, goals, powers: r.powers });
+  setScene(new Match(cfg));
+}
+function startGuest(d) {
+  G.stadium = d.stadium; NET.snap = null; NET.sfxQ = []; NET.spQ = [];
+  setScene(new NetMatch({ c1: d.c1, c2: d.c2, stadium: d.stadium, ctrl1: null, ctrl2: null, time: d.time, goals: d.goals, powers: d.powers, allowDraw: false, net: 'guest', onEnd: () => { } }));
+}
+class RemoteCtrl {
+  constructor() { this.i = { left: false, right: false, up: false, kick: false }; this.pw = false; }
+  set(d) { this.i = { left: !!d.l, right: !!d.r, up: !!d.u, kick: !!d.k }; if (d.p) this.pw = true; }
+  get() { const o = { left: this.i.left, right: this.i.right, up: this.i.up, kick: this.i.kick, power: this.pw }; this.pw = false; return o; }
+}
+
+// foto do estado do jogo (host -> convidado)
+function netSendSnap(m) {
+  if (!NET.conn || !NET.conn.open) return;
+  const r1 = v => Math.round(v * 10) / 10;
+  const pl = p => ({ sd: p.side, x: r1(p.x), y: r1(p.y), vx: r1(p.vx), vy: r1(p.vy), kx: r1(p.kx), f: p.facing, kt: r1(p.kickT), ka: p.kickAir ? 1 : 0, og: p.onGround ? 1 : 0, wh: p.wheelie, pw: r1(p.power), hu: r1(p.hurt), fx: p.fx, lf: p.life });
+  const bl = b => ({ x: r1(b.x), y: r1(b.y), vx: r1(b.vx), vy: r1(b.vy), rot: Math.round(b.rot * 100) / 100, fire: b.fire, ghost: b.ghost, life: b.life });
+  const fx = [];
+  for (const e of m.fxs) {
+    const d = {};
+    for (const k of Object.keys(e)) {
+      const v = e[k];
+      if (v instanceof Player) { const i = m.players.indexOf(v); if (i >= 0) d[k] = { __p: i }; }
+      else if (v === null || typeof v !== 'object') d[k] = v;
+    }
+    fx.push({ c: e.constructor.name, d });
+  }
+  const msg = {
+    t: 'snap', sc: m.score, tm: m.time, go: m.golden ? 1 : 0, st: m.state, stT: m.stT, k: m.kicked ? 1 : 0, ov: m.over ? 1 : 0, sh: m.shake, pa: m.party, ti: m.tilt,
+    pl: m.players.map(pl), al: m.allies.map(pl), b: bl(m.ball), fk: m.fakes.map(bl),
+    pt: m.parts.slice(-80).map(q => [Math.round(q.x), Math.round(q.y), q.life, q.max, q.col, q.s || 1, q.note ? 1 : 0]),
+    tx: m.texts, bn: m.banners, fx, sfx: NET.log ? NET.log.splice(0) : [], sp: NET.slog ? NET.slog.splice(0) : [],
+  };
+  try { NET.conn.send(msg); } catch (e) { }
+}
+const FXC = { Patada, Car, Aura67, Roulette, Drums, BassDrop, Ring, Pow };
+function applyP(p, q) {
+  p.x = q.x; p.y = q.y; p.vx = q.vx; p.vy = q.vy; p.kx = q.kx; p.facing = q.f; p.kickT = q.kt; p.kickAir = !!q.ka;
+  p.onGround = !!q.og; p.wheelie = q.wh; p.power = q.pw; p.hurt = q.hu; p.fx = q.fx || {}; p.life = q.lf || 0;
+}
+function applyBall(b, q) { b.x = q.x; b.y = q.y; b.vx = q.vx; b.vy = q.vy; b.rot = q.rot; b.fire = q.fire; b.ghost = q.ghost; b.life = q.life; }
+
+// partida vista pelo convidado: só desenha o que o host mandou
+class NetMatch extends Match {
+  constructor(cfg) {
+    super(cfg);
+    this.ctrl = new HumanCtrl(CTRL.solo); this.players[1].ctrl = this.ctrl; this.lastInp = ''; this.sendT = 0;
+  }
+  update() {
+    this.t++;
+    if (wasPressed('Escape', 'KeyP')) { this.paused = !this.paused; this.pauseMenu.i = 0; SFX.play('back'); }
+    else if (this.paused) this.pauseMenu.update();
+    const inp = this.paused ? {} : this.ctrl.get();
+    const s = (inp.left ? 'l' : '') + (inp.right ? 'r' : '') + (inp.up ? 'u' : '') + (inp.kick ? 'k' : '') + (inp.power ? 'p' : '');
+    if (s !== this.lastInp || ++this.sendT >= 10) { this.sendT = 0; this.lastInp = s; netSend({ t: 'inp', l: inp.left ? 1 : 0, r: inp.right ? 1 : 0, u: inp.up ? 1 : 0, k: inp.kick ? 1 : 0, p: inp.power ? 1 : 0 }); }
+    for (const n of NET.sfxQ.splice(0)) SFX.play(n);
+    for (const a of NET.spQ.splice(0)) speak(a[0], a[1], a[2], a[3]);
+    const sn = NET.snap; if (sn) { NET.snap = null; this.apply(sn); }
+  }
+  apply(s) {
+    this.score = s.sc; this.time = s.tm; this.golden = !!s.go; this.state = s.st; this.stT = s.stT; this.kicked = !!s.k; this.over = !!s.ov;
+    this.shake = s.sh; this.party = s.pa; this.tilt = s.ti || null;
+    this.players.forEach((p, i) => applyP(p, s.pl[i]));
+    this.allies = s.al.map(q => { const a = new Player(FELIPE2, q.sd, this, null); a.isAlly = true; applyP(a, q); return a; });
+    applyBall(this.ball, s.b);
+    this.fakes = s.fk.map(q => { const b = new Ball(true); applyBall(b, q); return b; });
+    this.parts = s.pt.map(a => ({ x: a[0], y: a[1], life: a[2], max: a[3], col: a[4], s: a[5], note: !!a[6] }));
+    this.texts = s.tx; this.banners = s.bn;
+    this.fxs = s.fx.map(f => this.mkFx(f)).filter(Boolean);
+  }
+  mkFx(f) {
+    const C = FXC[f.c]; if (!C) return null;
+    const o = Object.create(C.prototype);
+    for (const k in f.d) { const v = f.d[k]; o[k] = (v && typeof v === 'object' && v.__p !== undefined) ? this.players[v.__p] : v; }
+    return o;
+  }
+}
+
+// ------------------------- telas do online -----------------------------
+class OnlineMenuScene {
+  constructor() {
+    this.t = 0;
+    this.menu = new Menu([
+      { label: 'CRIAR SALA', action: () => setScene(new HostWaitScene()) },
+      { label: 'ENTRAR EM SALA', action: () => setScene(new JoinScene()) },
+      { label: 'VOLTAR', action: () => setScene(new TitleScene()) },
+    ], { y: 100, w: 200 });
+  }
+  update() { this.t++; if (wasPressed('Escape')) { SFX.play('back'); setScene(new TitleScene()); return; } this.menu.update(); }
+  render() {
+    dimBg('japao', 0.7); title('ONLINE', 14);
+    txt('JOGUE COM UM AMIGO PELA INTERNET', W / 2, 44, { align: 'center', color: '#cfd8ff' });
+    this.menu.draw();
+    txt('Um cria a sala e passa o código', W / 2, 190, { align: 'center', color: '#9aa0c0' });
+    txt('pro outro, que entra digitando ele.', W / 2, 202, { align: 'center', color: '#9aa0c0' });
+    if (typeof Peer === 'undefined') txt('SEM INTERNET OU PEERJS BLOQUEADO', W / 2, 232, { align: 'center', color: '#ff6b6b' });
+  }
+}
+class HostWaitScene {
+  constructor() {
+    this.t = 0; this.code = ''; this.err = ''; this.copied = 0;
+    netReset();
+    netCreateHost(code => { this.code = code; }, msg => { this.err = msg; }, () => { G.mode = 'online'; setScene(new SelectScene()); });
+    this.menu = new Menu([
+      { label: 'COPIAR CÓDIGO', action: () => this.copy() },
+      { label: 'CANCELAR', action: () => { netReset(); setScene(new OnlineMenuScene()); } },
+    ], { y: 214, w: 170, horiz: true, gap: 8 });
+  }
+  copy() { if (!this.code) return; try { navigator.clipboard.writeText(this.code); this.copied = 90; } catch (e) { } }
+  update() {
+    this.t++; if (this.copied) this.copied--;
+    if (wasPressed('Escape')) { SFX.play('back'); netReset(); setScene(new OnlineMenuScene()); return; }
+    this.menu.update();
+  }
+  render() {
+    dimBg('loterica', 0.78); title('SALA CRIADA', 12);
+    if (this.err) { txt(this.err, W / 2, 100, { align: 'center', color: '#ff6b6b' }); txt('TENTE DE NOVO MAIS TARDE', W / 2, 116, { align: 'center', color: '#cfd8ff' }); }
+    else if (!this.code) txt('CRIANDO SALA' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 100, { align: 'center', color: '#cfd8ff' });
+    else {
+      txt('CÓDIGO DA SALA', W / 2, 52, { align: 'center', color: '#9aa0c0' });
+      panel(W / 2 - 130, 70, 260, 50, 'rgba(10,8,30,0.92)', '#ffd23a');
+      txt(this.code.split('').join(' '), W / 2, 86, { align: 'center', size: 24, color: '#ffd23a' });
+      txt('PASSE ESSE CÓDIGO PRO SEU AMIGO', W / 2, 140, { align: 'center', color: '#ffffff' });
+      txt('AGUARDANDO ELE ENTRAR' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 160, { align: 'center', color: '#3fd0ff' });
+      if (this.copied) txt('COPIADO!', W / 2, 186, { align: 'center', color: '#7CFC00' });
+    }
+    this.menu.draw();
+  }
+}
+class JoinScene {
+  constructor() {
+    this.t = 0; this.code = ''; this.err = ''; this.busy = false; this.typing = true;
+    netReset();
+    this.kd = e => {
+      if (this.busy || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key && e.key.length === 1 && /[a-zA-Z0-9]/.test(e.key)) { if (this.code.length < 5) this.code += e.key.toUpperCase(); this.err = ''; }
+      else if (e.key === 'Backspace') { this.code = this.code.slice(0, -1); this.err = ''; }
+    };
+    this.pa = e => {
+      const s = (((e.clipboardData || window.clipboardData).getData('text')) || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
+      if (s && !this.busy) { this.code = s; this.err = ''; }
+    };
+    addEventListener('keydown', this.kd); addEventListener('paste', this.pa);
+  }
+  exit() { removeEventListener('keydown', this.kd); removeEventListener('paste', this.pa); this.typing = false; }
+  btn(i) { return { x: W / 2 - 160 + i * 168, y: 200, w: 152, h: 18 }; }
+  connect() {
+    if (this.code.length < 5 || this.busy) { if (this.code.length < 5) { this.err = 'O CÓDIGO TEM 5 CARACTERES'; SFX.play('back'); } return; }
+    this.busy = true; this.err = ''; SFX.play('select');
+    netJoin(this.code, msg => { this.busy = false; this.err = msg; netReset(); });
+  }
+  update() {
+    this.t++;
+    if (wasPressed('Escape')) { SFX.play('back'); netReset(); setScene(new OnlineMenuScene()); return; }
+    if (wasPressed('Enter', 'NumpadEnter')) this.connect();
+    if (mouse.click) {
+      if (inRect(mouse, this.btn(0))) this.connect();
+      else if (inRect(mouse, this.btn(1))) { SFX.play('back'); netReset(); setScene(new OnlineMenuScene()); }
+    }
+  }
+  render() {
+    dimBg('taiwan', 0.78); title('ENTRAR EM SALA', 12);
+    txt('DIGITE O CÓDIGO DA SALA', W / 2, 50, { align: 'center', color: '#cfd8ff' });
+    for (let i = 0; i < 5; i++) {
+      const x = W / 2 - 100 + i * 40, y = 76, ch = this.code[i];
+      R(ctx, x, y, 36, 44, '#1a1440'); frameRect(ctx, x, y, 36, 44, i === this.code.length && !this.busy ? '#ffd23a' : '#4a4290', 2);
+      if (ch) txt(ch, x + 18, y + 14, { align: 'center', size: 16, color: '#ffffff' });
+      else if (i === this.code.length && !this.busy && this.t % 40 < 24) R(ctx, x + 10, y + 34, 16, 3, '#ffd23a');
+    }
+    if (this.busy) txt('CONECTANDO' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 136, { align: 'center', color: '#3fd0ff' });
+    else if (this.err) txt(this.err, W / 2, 136, { align: 'center', color: '#ff6b6b' });
+    else txt('COLE (CTRL+V) OU DIGITE · ENTER ENTRA', W / 2, 136, { align: 'center', color: '#9aa0c0' });
+    ['ENTRAR', 'VOLTAR'].forEach((s, i) => {
+      const b = this.btn(i), sel = i === 0 && this.code.length === 5;
+      R(ctx, b.x, b.y, b.w, b.h, sel ? '#ffd23a' : 'rgba(16,12,40,0.9)'); frameRect(ctx, b.x, b.y, b.w, b.h, '#ffffff');
+      txt(s, b.x + b.w / 2, b.y + 5, { align: 'center', color: sel ? '#1a1222' : '#ffffff', outline: !sel });
+    });
+  }
+}
+class NetWaitScene {
+  constructor(msg) { this.msg = msg; this.t = 0; }
+  get online() { return true; }
+  update() { this.t++; if (wasPressed('Escape')) { SFX.play('back'); netLeave(); } }
+  render() {
+    dimBg(G.stadium, 0.7); title('SALA ONLINE', 12);
+    txt(this.msg + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 120, { align: 'center', color: '#cfd8ff' });
+    txt('ESC: SAIR DA SALA', W / 2, 246, { align: 'center', color: '#9aa0c0' });
+  }
+}
+class MsgScene {
+  constructor(msg) { this.msg = msg; this.menu = new Menu([{ label: 'OK', action: () => setScene(new TitleScene()) }], { y: 150, w: 120 }); }
+  update() { if (wasPressed('Escape')) { setScene(new TitleScene()); return; } this.menu.update(); }
+  render() { bgPattern(); txt(this.msg, W / 2, 100, { align: 'center', color: '#ffd23a' }); this.menu.draw(); }
+}
+
 // ============================ BOOT ====================================
 let scene = null, frame = 0, fadeT = 0;
-function setScene(s) { scene = s; fadeT = 10; if (s.enter) s.enter(); }
+function setScene(s) { if (scene && scene.exit) scene.exit(); scene = s; fadeT = 10; if (s.enter) s.enter(); }
 let last = performance.now(), acc = 0;
 function loop(now) {
   let dt = now - last; last = now; if (dt > 100) dt = 100; acc += dt;
   while (acc >= STEP) {
-    if (wasPressed('KeyM')) { SFX.muted = !SFX.muted; if (SFX.muted && window.speechSynthesis) speechSynthesis.cancel(); }
+    if (wasPressed('KeyM') && !(scene && scene.typing)) { SFX.muted = !SFX.muted; if (SFX.muted && window.speechSynthesis) speechSynthesis.cancel(); }
     if (scene) scene.update();
     frame++; if (fadeT > 0) fadeT--;
     for (const k in pressed) delete pressed[k];
