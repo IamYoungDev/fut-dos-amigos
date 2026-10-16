@@ -1815,7 +1815,17 @@ const DIFF_OPTS = [{ v: 0, l: 'FÁCIL' }, { v: 1, l: 'MÉDIO' }, { v: 2, l: 'DIF
 const TIME_OPTS = [{ v: 60, l: '60 SEG' }, { v: 90, l: '90 SEG' }, { v: 120, l: '2 MIN' }, { v: 180, l: '3 MIN' }, { v: 300, l: '5 MIN' }, { v: 0, l: 'SEM LIMITE' }];
 const GOAL_OPTS = [{ v: 3, l: '3 GOLS' }, { v: 5, l: '5 GOLS' }, { v: 7, l: '7 GOLS' }, { v: 10, l: '10 GOLS' }, { v: 0, l: 'SEM LIMITE' }];
 const POW_OPTS = [{ v: true, l: 'LIGADOS' }, { v: false, l: 'DESLIGADOS' }];
-const G = { mode: 'local', diff: 1, c1: 'marcelo', c2: 'vini', stadium: 'piaui', tour: null, rules: { time: 90, goals: 5, powers: true } };
+const ONLINE_MODES = [{ v: 'casual', l: 'CASUAL' }, { v: 'tour', l: 'TORNEIO (MD3)' }];
+const G = { mode: 'local', diff: 1, c1: 'marcelo', c2: 'vini', stadium: 'piaui', tour: null, rules: { time: 90, goals: 5, powers: true }, online: { mode: 'casual', time: 90, goals: 5, powers: true } };
+const optLabel = (opts, v) => (opts.find(o => o.v === v) || opts[0]).l;
+// regras da sala online (o host define; o convidado recebe pela rede)
+function netCfgPowers() { return NET.role === 'guest' ? (NET.cfg ? NET.cfg.powers !== false : true) : G.online.powers; }
+function netCfgLines(c) {
+  return [
+    'MODO: ' + (c.mode === 'tour' ? 'TORNEIO (MELHOR DE 3)' : 'CASUAL'),
+    'TEMPO: ' + optLabel(TIME_OPTS, c.time) + ' · GOLS: ' + optLabel(GOAL_OPTS, c.goals) + ' · PODERES: ' + (c.powers === false ? 'NÃO' : 'SIM'),
+  ];
+}
 const timeRow = r => ({ label: 'TEMPO', values: TIME_OPTS, get: () => r.time, set: v => { r.time = v; } });
 const goalsRow = r => ({ label: 'GOLS PRA VENCER', values: GOAL_OPTS, get: () => r.goals, set: v => { r.goals = v; } });
 const powersRow = r => ({ label: 'PODERES', values: POW_OPTS, get: () => r.powers, set: v => { r.powers = v; } });
@@ -1970,7 +1980,7 @@ class SelectScene {
     const info = (k, x) => {
       const ch = CHARS[this.cur[k]], w = 232; panel(x, 156, w, 110, 'rgba(10,8,30,0.92)', k ? '#ef4444' : '#3b82ff');
       let y = 161; txt(ch.name, x + 6, y, { color: ch.color });
-      if (G.rules.powers) txt(ch.charge + 's', x + w - 6, y, { align: 'right', color: '#9aa0c0' });
+      if (this.mode === 'online' ? netCfgPowers() : G.rules.powers) txt(ch.charge + 's', x + w - 6, y, { align: 'right', color: '#9aa0c0' });
       y += 13;
       txt('PASSIVO: ' + ch.passive.name, x + 6, y, { color: '#ffd23a' }); y += 11;
       for (const l of wrap(ch.passive.desc, w - 12)) { txt(l, x + 6, y, { color: '#e8e8f0' }); y += 10; }
@@ -2056,7 +2066,9 @@ class VsScene {
 class ResultScene {
   constructor(r, tour, net) {
     this.r = r; this.tour = tour; this.net = net; this.t = 0;
-    const items = net ? [{ label: 'MENU', action: () => { netReset(); setScene(new TitleScene()); } }] : tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
+    const S = net ? NET.series : null, serOver = !!S && Math.max(S.w[0], S.w[1]) >= S.need;
+    const toMenu = { label: 'MENU', action: () => { netReset(); setScene(new TitleScene()); } };
+    const items = net ? (S && !serOver && NET.role === 'host' ? [{ label: 'PRÓXIMO JOGO', action: () => netStartHost() }, toMenu] : [toMenu]) : tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
       : [{ label: 'REVANCHE', action: () => startMatch() }, { label: 'TROCAR JOGADORES', action: () => setScene(new SelectScene()) }, { label: 'MENU', action: () => setScene(new TitleScene()) }];
     this.menu = new Menu(items, { y: 186, w: 200 });
     const mineIdx = NET.role === 'guest' ? 1 : 0;
@@ -2085,6 +2097,12 @@ class ResultScene {
     txt(`${s[0]} x ${s[1]}`, W / 2, 152, { align: 'center', size: 16 });
     txt(A.short, W / 2 - 50, 156, { align: 'right', color: A.color });
     txt(B.short, W / 2 + 50, 156, { color: B.color });
+    const S = this.net ? NET.series : null;
+    if (S) {
+      const me = NET.role === 'guest' ? 1 : 0, a = S.w[me], b = S.w[1 - me], over = Math.max(a, b) >= S.need;
+      if (over) txt(a > b ? 'VOCÊ GANHOU A SÉRIE!' : 'O AMIGO GANHOU A SÉRIE...', W / 2, 166, { align: 'center', color: '#ffd23a' });
+      else txt(NET.role === 'host' ? 'TORNEIO · VOCÊ ' + a + ' x ' + b + ' AMIGO' : 'TORNEIO · VOCÊ ' + a + ' x ' + b + ' AMIGO · AGUARDE O HOST', W / 2, 166, { align: 'center', color: '#cfd8ff' });
+    }
     this.menu.draw();
   }
 }
@@ -2518,7 +2536,7 @@ class ChampionScene {
 
 // ============================ ONLINE (P2P / PeerJS) ===================
 // O host roda a partida inteira; o convidado manda os controles e recebe "fotos" do jogo.
-const NET = { peer: null, conn: null, role: null, code: '', myPick: null, oppPick: null, snap: null, sfxQ: [], spQ: [], log: null, slog: null, remote: null };
+const NET = { peer: null, conn: null, role: null, code: '', myPick: null, oppPick: null, snap: null, sfxQ: [], spQ: [], log: null, slog: null, remote: null, cfg: null, series: null };
 const CODE_CH = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const genCode = () => { let s = ''; for (let i = 0; i < 5; i++) s += CODE_CH[Math.floor(Math.random() * CODE_CH.length)]; return s; };
 const PEER_PREFIX = 'hsgalera-';
@@ -2526,7 +2544,7 @@ const PEER_PREFIX = 'hsgalera-';
 function netReset() {
   const peer = NET.peer, conn = NET.conn;
   NET.peer = null; NET.conn = null; NET.role = null; NET.code = ''; NET.myPick = null; NET.oppPick = null;
-  NET.snap = null; NET.sfxQ = []; NET.spQ = []; NET.log = null; NET.slog = null; NET.remote = null;
+  NET.snap = null; NET.sfxQ = []; NET.spQ = []; NET.log = null; NET.slog = null; NET.remote = null; NET.cfg = null; NET.series = null;
   setTimeout(() => { try { conn && conn.close(); } catch (e) { } try { peer && peer.destroy(); } catch (e) { } }, 250);
 }
 function netSend(o) { try { if (NET.conn && NET.conn.open) NET.conn.send(o); } catch (e) { } }
@@ -2597,6 +2615,7 @@ function netHandle(d) {
   if (!d || !d.t) return;
   switch (d.t) {
     case 'pick': NET.oppPick = d.id; netAdvance(); break;
+    case 'cfg': if (NET.role === 'guest') NET.cfg = { mode: d.mode === 'tour' ? 'tour' : 'casual', time: d.time, goals: d.goals, powers: d.powers !== false }; break;
     case 'start': if (NET.role === 'guest') startGuest(d); break;
     case 'snap':
       NET.snap = d;
@@ -2604,7 +2623,7 @@ function netHandle(d) {
       if (d.sp && d.sp.length) { NET.spQ.push(...d.sp); if (NET.spQ.length > 3) NET.spQ.splice(0, NET.spQ.length - 3); }
       break;
     case 'inp': if (NET.remote) NET.remote.set(d); break;
-    case 'end': if (NET.role === 'guest') setScene(new ResultScene(d.res, false, true)); break;
+    case 'end': if (NET.role === 'guest') { NET.series = d.series || null; setScene(new ResultScene(d.res, false, true)); } break;
     case 'bye': netLost(); break;
   }
 }
@@ -2615,12 +2634,16 @@ function netAdvance() {
   else setScene(new NetWaitScene('O HOST ESTÁ ESCOLHENDO O ESTÁDIO'));
 }
 function netStartHost() {
-  const r = G.rules; let time = r.time, goals = r.goals; if (!time && !goals) goals = 5;
+  const r = G.online; let time = r.time, goals = r.goals; if (!time && !goals) goals = 5;
   const remote = new RemoteCtrl(); NET.remote = remote; NET.log = []; NET.slog = []; NET.snap = null;
   const cfg = {
     c1: NET.myPick, c2: NET.oppPick, stadium: G.stadium, ctrl1: new HumanCtrl(CTRL.solo), ctrl2: remote,
     time, goals, powers: r.powers, allowDraw: false, net: 'host',
-    onEnd: res => { netSend({ t: 'end', res }); setScene(new ResultScene(res, false, true)); },
+    onEnd: res => {
+      const S = NET.series; // torneio: melhor de 3
+      if (S) { S.n++; if (res.winner === 0 || res.winner === 1) S.w[res.winner]++; }
+      netSend({ t: 'end', res, series: S || null }); setScene(new ResultScene(res, false, true));
+    },
   };
   netSend({ t: 'start', c1: cfg.c1, c2: cfg.c2, stadium: cfg.stadium, time, goals, powers: r.powers });
   setScene(new Match(cfg));
@@ -2726,31 +2749,49 @@ class HostWaitScene {
   constructor() {
     this.t = 0; this.code = ''; this.err = ''; this.copied = 0;
     netReset();
-    netCreateHost(code => { this.code = code; }, msg => { this.err = msg; }, () => { G.mode = 'online'; setScene(new SelectScene()); });
-    this.menu = new Menu([
+    netCreateHost(code => { this.code = code; }, msg => { this.err = msg; }, () => this.begin());
+    const o = G.online;
+    // o host define as regras da sala; valem pra partida inteira (e pra série, no torneio)
+    this.opt = new Options([
+      { label: 'MODO DE JOGO', values: ONLINE_MODES, get: () => o.mode, set: v => { o.mode = v; } },
+      timeRow(o), goalsRow(o), powersRow(o),
       { label: 'COPIAR CÓDIGO', action: () => this.copy() },
       { label: 'CANCELAR', action: () => { netReset(); setScene(new OnlineMenuScene()); } },
-    ], { y: 214, w: 170, horiz: true, gap: 8 });
+    ], { y: 98, w: 340, h: 16, gap: 3 });
+  }
+  // o amigo entrou: manda as regras pra ele e vai escolher jogador
+  begin() {
+    const o = G.online;
+    NET.cfg = { mode: o.mode, time: o.time, goals: o.goals, powers: o.powers };
+    NET.series = o.mode === 'tour' ? { w: [0, 0], n: 0, need: 2 } : null;
+    netSend({ t: 'cfg', mode: o.mode, time: o.time, goals: o.goals, powers: o.powers });
+    G.mode = 'online'; setScene(new SelectScene());
   }
   copy() { if (!this.code) return; try { navigator.clipboard.writeText(this.code); this.copied = 90; } catch (e) { } }
   update() {
     this.t++; if (this.copied) this.copied--;
     if (wasPressed('Escape')) { SFX.play('back'); netReset(); setScene(new OnlineMenuScene()); return; }
-    this.menu.update();
+    this.opt.update();
   }
   render() {
-    dimBg('loterica', 0.78); title('SALA CRIADA', 12);
-    if (this.err) { txt(this.err, W / 2, 100, { align: 'center', color: '#ff6b6b' }); txt('TENTE DE NOVO MAIS TARDE', W / 2, 116, { align: 'center', color: '#cfd8ff' }); }
-    else if (!this.code) txt('CRIANDO SALA' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 100, { align: 'center', color: '#cfd8ff' });
-    else {
-      txt('CÓDIGO DA SALA', W / 2, 52, { align: 'center', color: '#9aa0c0' });
-      panel(W / 2 - 130, 70, 260, 50, 'rgba(10,8,30,0.92)', '#ffd23a');
-      txt(this.code.split('').join(' '), W / 2, 86, { align: 'center', size: 24, color: '#ffd23a' });
-      txt('PASSE ESSE CÓDIGO PRO SEU AMIGO', W / 2, 140, { align: 'center', color: '#ffffff' });
-      txt('AGUARDANDO ELE ENTRAR' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 160, { align: 'center', color: '#3fd0ff' });
-      if (this.copied) txt('COPIADO!', W / 2, 186, { align: 'center', color: '#7CFC00' });
+    dimBg('loterica', 0.78); title('SALA ONLINE', 6);
+    if (this.code) {
+      txt('CÓDIGO DA SALA', W / 2, 20, { align: 'center', color: '#9aa0c0' });
+      panel(W / 2 - 130, 31, 260, 38, 'rgba(10,8,30,0.92)', '#ffd23a');
+      txt(this.code.split('').join(' '), W / 2, 38, { align: 'center', size: 24, color: '#ffd23a' });
     }
-    this.menu.draw();
+    if (this.err) txt(this.err + ' · TENTE DE NOVO MAIS TARDE', W / 2, 76, { align: 'center', color: '#ff6b6b' });
+    else if (!this.code) txt('CRIANDO SALA' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 76, { align: 'center', color: '#cfd8ff' });
+    else {
+      txt('AGUARDANDO O AMIGO ENTRAR' + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 76, { align: 'center', color: '#3fd0ff' });
+      if (this.copied) txt('COPIADO!', W / 2, 87, { align: 'center', color: '#7CFC00' });
+    }
+    this.opt.draw();
+    const o = G.online;
+    if (!o.time && !o.goals) txt('Sem tempo e sem gols vira 5 gols.', W / 2, 218, { align: 'center', color: '#ff8a3c' });
+    else if (o.mode === 'tour') txt('Torneio: melhor de 3 partidas. Quem ganhar 2 leva.', W / 2, 218, { align: 'center', color: '#cfd8ff' });
+    else txt('Casual: uma partida só.', W / 2, 218, { align: 'center', color: '#cfd8ff' });
+    txt('CIMA/BAIXO escolhe · ESQ/DIR muda', W / 2, 250, { align: 'center', color: '#9aa0c0' });
   }
 }
 class JoinScene {
@@ -2810,6 +2851,7 @@ class NetWaitScene {
   render() {
     dimBg(G.stadium, 0.7); title('SALA ONLINE', 12);
     txt(this.msg + '.'.repeat(1 + Math.floor(this.t / 20) % 3), W / 2, 120, { align: 'center', color: '#cfd8ff' });
+    if (NET.cfg) { txt('REGRAS DA SALA', W / 2, 160, { align: 'center', color: '#ffd23a' }); netCfgLines(NET.cfg).forEach((l, i) => txt(l, W / 2, 176 + i * 12, { align: 'center', color: '#e8e8f0' })); }
     txt('ESC: SAIR DA SALA', W / 2, 246, { align: 'center', color: '#9aa0c0' });
   }
 }
