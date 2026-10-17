@@ -2067,14 +2067,16 @@ class ResultScene {
   constructor(r, tour, net) {
     this.r = r; this.tour = tour; this.net = net; this.t = 0;
     const S = net ? NET.series : null, serOver = !!S && Math.max(S.w[0], S.w[1]) >= S.need;
-    const toMenu = { label: 'MENU', action: () => { netReset(); setScene(new TitleScene()); } };
-    const items = net ? (S && !serOver && NET.role === 'host' ? [{ label: 'PRÓXIMO JOGO', action: () => netStartHost() }, toMenu] : [toMenu]) : tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
+    const toMenu = { label: 'MENU', action: () => netLeave() };
+    const rem = { label: 'REVANCHE', action: () => { if (NET.myRematch) return; NET.myRematch = true; rem.label = 'AGUARDANDO...'; netSend({ t: 'rematch' }); netRematchCheck(); } };
+    const items = net ? (S && !serOver ? (NET.role === 'host' ? [{ label: 'PRÓXIMO JOGO', action: () => netStartHost() }, toMenu] : [toMenu]) : [rem, toMenu]) : tour ? [{ label: 'CONTINUAR', action: () => setScene(G.tour.phase === 'done' ? new ChampionScene(G.tour.champion) : new TourHubScene()) }]
       : [{ label: 'REVANCHE', action: () => startMatch() }, { label: 'TROCAR JOGADORES', action: () => setScene(new SelectScene()) }, { label: 'MENU', action: () => setScene(new TitleScene()) }];
     this.menu = new Menu(items, { y: 186, w: 200 });
     const mineIdx = NET.role === 'guest' ? 1 : 0;
     const humanLost = net ? (r.winner !== -1 && r.winner !== mineIdx) : (!tour && G.mode === 'cpu' && r.winner === 1);
     SFX.play(r.winner === -1 ? 'coin' : humanLost ? 'lose' : 'jackpot');
   }
+  get online() { return !!this.net; }
   update() { this.t++; this.menu.update(); }
   render() {
     dimBg(G.stadium, 0.62);
@@ -2530,13 +2532,14 @@ class ChampionScene {
     drawHead(ctx, getHead(this.id), tx, 76 - Math.abs(Math.sin(this.t * 0.1)) * 8, 1, 3);
     txt(ch.name, W / 2, 220, { align: 'center', color: ch.color });
     const T = G.tour; if (T && T.vice) txt('VICE: ' + CHAR_BY_ID[T.vice].short, W / 2, 232, { align: 'center', color: '#9aa0c0' });
+    if (this.net && NET.oppRematch && !NET.myRematch) txt('O AMIGO QUER REVANCHE!', W / 2, 177, { align: 'center', color: frame % 40 < 28 ? '#7CFC00' : '#ffffff' });
     this.menu.draw();
   }
 }
 
 // ============================ ONLINE (P2P / PeerJS) ===================
 // O host roda a partida inteira; o convidado manda os controles e recebe "fotos" do jogo.
-const NET = { peer: null, conn: null, role: null, code: '', myPick: null, oppPick: null, snap: null, sfxQ: [], spQ: [], log: null, slog: null, remote: null, cfg: null, series: null };
+const NET = { peer: null, conn: null, role: null, code: '', myPick: null, oppPick: null, snap: null, sfxQ: [], spQ: [], log: null, slog: null, remote: null, cfg: null, series: null, myRematch: false, oppRematch: false };
 const CODE_CH = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const genCode = () => { let s = ''; for (let i = 0; i < 5; i++) s += CODE_CH[Math.floor(Math.random() * CODE_CH.length)]; return s; };
 const PEER_PREFIX = 'hsgalera-';
@@ -2544,7 +2547,7 @@ const PEER_PREFIX = 'hsgalera-';
 function netReset() {
   const peer = NET.peer, conn = NET.conn;
   NET.peer = null; NET.conn = null; NET.role = null; NET.code = ''; NET.myPick = null; NET.oppPick = null;
-  NET.snap = null; NET.sfxQ = []; NET.spQ = []; NET.log = null; NET.slog = null; NET.remote = null; NET.cfg = null; NET.series = null;
+  NET.snap = null; NET.sfxQ = []; NET.spQ = []; NET.log = null; NET.slog = null; NET.remote = null; NET.cfg = null; NET.series = null; NET.myRematch = false; NET.oppRematch = false;
   setTimeout(() => { try { conn && conn.close(); } catch (e) { } try { peer && peer.destroy(); } catch (e) { } }, 250);
 }
 function netSend(o) { try { if (NET.conn && NET.conn.open) NET.conn.send(o); } catch (e) { } }
@@ -2616,6 +2619,7 @@ function netHandle(d) {
   switch (d.t) {
     case 'pick': NET.oppPick = d.id; netAdvance(); break;
     case 'cfg': if (NET.role === 'guest') NET.cfg = { mode: d.mode === 'tour' ? 'tour' : 'casual', time: d.time, goals: d.goals, powers: d.powers !== false }; break;
+    case 'rematch': NET.oppRematch = true; netRematchCheck(); break;
     case 'start': if (NET.role === 'guest') startGuest(d); break;
     case 'snap':
       NET.snap = d;
@@ -2626,6 +2630,13 @@ function netHandle(d) {
     case 'end': if (NET.role === 'guest') { NET.series = d.series || null; setScene(new ResultScene(d.res, false, true)); } break;
     case 'bye': netLost(); break;
   }
+}
+// revanche na mesma sala: quando os dois pedem, voltam pra escolha de jogador (o host escolhe o estádio depois)
+function netRematchCheck() {
+  if (!NET.myRematch || !NET.oppRematch || !(scene instanceof ResultScene) || !scene.net) return;
+  NET.myRematch = false; NET.oppRematch = false; NET.myPick = null; NET.oppPick = null; NET.snap = null;
+  NET.series = NET.role === 'host' && NET.cfg && NET.cfg.mode === 'tour' ? { w: [0, 0], n: 0, need: 2 } : null;
+  G.mode = 'online'; SFX.play('select'); setScene(new SelectScene());
 }
 // os dois já escolheram o jogador: o host escolhe o estádio, o convidado espera
 function netAdvance() {
